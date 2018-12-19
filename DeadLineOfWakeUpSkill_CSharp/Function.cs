@@ -6,7 +6,10 @@ using Alexa.NET.Request;
 using Alexa.NET.Request.Type;
 using Alexa.NET.Response;
 using AlexaPersistentAttributesManager;
+using Amazon.DynamoDBv2.DocumentModel;
 using Amazon.Lambda.Core;
+using DeadLineOfWakeUpSkill_CSharp.ExtensionMethods;
+
 
 // Assembly attribute to enable the Lambda function's JSON input to be converted into a .NET class.
 [assembly: LambdaSerializer(typeof(Amazon.Lambda.Serialization.Json.JsonSerializer))]
@@ -16,9 +19,15 @@ namespace DeadLineOfWakeUpSkill_CSharp
     public class Function
     {
         private readonly string skillName = "DeadLineOfWakeUpSkill";
-        private readonly string slot_wakeTime = "wakeTime";
+        private readonly string cardTitle = "睡眠リミット";
 
-        //hello
+        private readonly string slot_wakeTimeUserSet = "wakeTimeUserSet";
+        private readonly string slot_dayTypeUserSet = "dayTypeUserSet";
+
+        private string db_wakeTimeWorkday = "wakeTimeWorkday";
+        private string db_wakeTimeHoliday = "wakeTimeHoliday";
+
+
         /// <summary>
         /// A simple function that takes a string and does a ToUpper
         /// </summary>
@@ -45,6 +54,18 @@ namespace DeadLineOfWakeUpSkill_CSharp
                                 break;
                             case "ReportRemainTimeIntent":
                                 skillResponse = ReportRemainTimeIntentHandler(skillRequest);
+                                break;
+                            case "ReportSettingIntent":
+                                skillResponse = ReportSettingIntentHandler(skillRequest);
+                                break;
+                            case "HelpAboutReportRemainTimeIntent":
+                                skillResponse = HelpAboutReportRemainTimeIntent(skillRequest);
+                                break;
+                            case "HelpAboutReportSettingIntent":
+                                skillResponse = HelpAboutReportSettingIntent(skillRequest);
+                                break;
+                            case "HelpAboutSetTimeIntent":
+                                skillResponse = HelpAboutSetTimeIntent(skillRequest);
                                 break;
                             case "AMAZON.HelpIntent":
                                 skillResponse = HelpIntentHandler(skillRequest);
@@ -81,12 +102,16 @@ namespace DeadLineOfWakeUpSkill_CSharp
 
 
         #region 各インテント、リクエストに対応する処理を担当するメソッドたち
-
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="skillRequest"></param>
+        /// <returns></returns>
         private SkillResponse LaunchRequestHandler(SkillRequest skillRequest)
         {
             var launchRequest = skillRequest.Request as LaunchRequest;
 
-            var speechText = "LaunchIntent";
+            var speechText = "";
 
 
             //DynamoDB利用の準備
@@ -94,11 +119,20 @@ namespace DeadLineOfWakeUpSkill_CSharp
             var tableName = $"{skillName}Table";
             var attrMgr = new AttributesManager(userId, tableName);
 
-            var attr = attrMgr.GetPersistentAttributes();
-            var wakeTime = attr?["wakeTime"] ?? "";
+            var dbHelper = new DBHelper(attrMgr);
 
-            speechText += $"現在設定されている時刻は{wakeTime}です。"+
-                "どうしますか？";
+
+            var nowJst = DateTimeUtility.GetNowJst();
+            var wakeTimeToday = dbHelper.GetTodaysWakeTimeString(nowJst);
+
+            if (!string.IsNullOrEmpty(wakeTimeToday))
+            {
+                speechText += MessageComposer.ReportDiffTime(dbHelper, nowJst);
+            }
+            else
+            {
+                speechText += MessageComposer.ReportSetting(dbHelper);
+            }
 
 
             var skillResponse = new SkillResponse
@@ -106,7 +140,6 @@ namespace DeadLineOfWakeUpSkill_CSharp
                 Version = "1.0",
                 Response = new ResponseBody()
             };
-
             skillResponse.Response.OutputSpeech = new PlainTextOutputSpeech
             {
                 Text = speechText
@@ -115,12 +148,12 @@ namespace DeadLineOfWakeUpSkill_CSharp
             {
                 OutputSpeech = new PlainTextOutputSpeech
                 {
-                    Text = speechText
+                    Text = MessageComposer.ReportAskAnythingElse()
                 }
             };
             skillResponse.Response.Card = new SimpleCard
             {
-                Title = "Hello World",
+                Title = cardTitle,
                 Content = speechText
             };
 
@@ -132,33 +165,52 @@ namespace DeadLineOfWakeUpSkill_CSharp
         {
             var intentRequest = skillRequest.Request as IntentRequest;
 
-            var speechText = "SetDeadLineIntent.";
+            var speechText = "";
 
+            //スロットから値を取得
+            var dayTypeInSlot = intentRequest.Intent.Slots.GetOrDefault(slot_dayTypeUserSet)?.Value ?? "平日";
+            var wakeTimeInSlot = intentRequest.Intent.Slots.GetOrDefault(slot_wakeTimeUserSet)?.Value ?? "";
+
+            var wakeTimeInSlotDateTimeOffset = DateTimeOffset.Parse(wakeTimeInSlot + "+09:00");//日本時間で
+
+            //DynamoDBに追加
+            var userId = skillRequest.Session.User.UserId;
+            var tableName = $"{skillName}Table";
+            var attrMgr = new AttributesManager(userId, tableName);
+
+            var dbHelper = new DBHelper(attrMgr);
+
+
+            //平日か休日か
+            if (dayTypeInSlot == "平日")
+            {
+                attrMgr.SetPersistentAttributes(db_wakeTimeWorkday, wakeTimeInSlotDateTimeOffset.ToString());
+                attrMgr.SetPersistentAttributes(db_wakeTimeHoliday, dbHelper.wakeTimeHolidayString);
+            }
+            else if (dayTypeInSlot == "休日")
+            {
+                attrMgr.SetPersistentAttributes(db_wakeTimeWorkday, dbHelper.wakeTimeWorkdayString);
+                attrMgr.SetPersistentAttributes(db_wakeTimeHoliday, wakeTimeInSlotDateTimeOffset.ToString());
+            }
+            attrMgr.SavePersistentAttributes();
+
+
+
+            speechText += MessageComposer.ReportTimeHasSet(dayTypeInSlot, wakeTimeInSlotDateTimeOffset);
+
+            //レスポンス
             var skillResponse = new SkillResponse
             {
                 Version = "1.0",
                 Response = new ResponseBody()
             };
-
-            var time = intentRequest.Intent.Slots[slot_wakeTime].Value;
-
-
-            //DynamoDBに追加
-            var userId = skillRequest.Session.User.UserId;
-            var tableName = $"{skillName}Table";
-            var attrMgr=new AttributesManager(userId,tableName);
-            attrMgr.SetPersistentAttributes("wakeTime",time);
-            //attrMgr.SavePersistentAttributes();
-            
-
-            speechText += time;
             skillResponse.Response.OutputSpeech = new PlainTextOutputSpeech
             {
                 Text = speechText
             };
             skillResponse.Response.Card = new SimpleCard
             {
-                Title = "Hello World",
+                Title = skillName,
                 Content = speechText
             };
             skillResponse.Response.ShouldEndSession = true;
@@ -167,38 +219,112 @@ namespace DeadLineOfWakeUpSkill_CSharp
         }
 
 
+
         private SkillResponse ReportRemainTimeIntentHandler(SkillRequest skillRequest)
         {
             var intentRequest = skillRequest.Request as IntentRequest;
 
-            var speechText = "ReportRemainTimeIntent";
+            var speechText = "";
 
-            //現在時刻を取得
-            var now = DateTimeOffset.UtcNow;
+            var nowJst = DateTimeUtility.GetNowJst();
 
             //設定時刻をDynamoDBから取得
             var userId = skillRequest.Session.User.UserId;
             var tableName = $"{skillName}Table";
-            var attrMgr=new AttributesManager(userId,tableName);
-            var attr = attrMgr.GetPersistentAttributes();
-            var wakeTimeString = attr?[slot_wakeTime] ?? "";
+            var attrMgr = new AttributesManager(userId, tableName);
 
-            //設定時刻をDateTimeOffset型に変換する。
-            var wakeTime=DateTimeOffset.Parse()
 
+            var dbHelper = new DBHelper(attrMgr);
+
+            var wakeTimeString = dbHelper.GetTodaysWakeTimeString(nowJst);
+            if (!string.IsNullOrEmpty(wakeTimeString))
+            {
+
+                speechText += MessageComposer.ReportDiffTime(dbHelper, nowJst);
+
+                var skillResponse = new SkillResponse
+                {
+                    Version = "1.0",
+                    Response = new ResponseBody()
+                };
+
+                skillResponse.Response.OutputSpeech = new PlainTextOutputSpeech
+                {
+                    Text = speechText
+                };
+                skillResponse.Response.Card = new SimpleCard
+                {
+                    Title = skillName,
+                    Content = speechText
+                };
+                skillResponse.Response.ShouldEndSession = true;
+
+                return skillResponse;
+            }
+            else
+            {
+
+                speechText += MessageComposer.ReportNotSetWakeTime(nowJst);
+
+                var skillResponse = new SkillResponse
+                {
+                    Version = "1.0",
+                    Response = new ResponseBody()
+                };
+
+                skillResponse.Response.OutputSpeech = new PlainTextOutputSpeech
+                {
+                    Text = speechText
+                };
+                skillResponse.Response.Card = new SimpleCard
+                {
+                    Title = skillName,
+                    Content = speechText
+                };
+                skillResponse.Response.ShouldEndSession = true;
+
+                return skillResponse;
+            }
+
+        }
+
+
+        private SkillResponse ReportSettingIntentHandler(SkillRequest skillRequest)
+        {
+            var intentRequest = skillRequest.Request as IntentRequest;
+
+            var speechText = "";
+
+            ////スロットから値を取得
+            //var dayTypeInSlot = intentRequest.Intent.Slots.GetOrDefault(slot_dayTypeUserSet)?.Value ?? "平日";
+            //var wakeTimeInSlot = intentRequest.Intent.Slots.GetOrDefault(slot_wakeTimeUserSet)?.Value ?? "";
+
+            //var wakeTimeInSlotDateTimeOffset = DateTimeOffset.Parse(wakeTimeInSlot + "+09:00");//日本時間で
+
+            //DynamoDB利用の準備
+            var userId = skillRequest.Session.User.UserId;
+            var tableName = $"{skillName}Table";
+            var attrMgr = new AttributesManager(userId, tableName);
+
+            var dbHelper = new DBHelper(attrMgr);
+
+            speechText += MessageComposer.ReportSetting(dbHelper);
+
+
+
+            //レスポンス
             var skillResponse = new SkillResponse
             {
                 Version = "1.0",
                 Response = new ResponseBody()
             };
-
             skillResponse.Response.OutputSpeech = new PlainTextOutputSpeech
             {
                 Text = speechText
             };
             skillResponse.Response.Card = new SimpleCard
             {
-                Title = "Hello World",
+                Title = skillName,
                 Content = speechText
             };
             skillResponse.Response.ShouldEndSession = true;
@@ -215,7 +341,12 @@ namespace DeadLineOfWakeUpSkill_CSharp
         {
             var intentRequest = skillRequest.Request as IntentRequest;
 
-            var speechText = "You can say hello to me!";
+
+            var speechText = "";
+
+
+            speechText += MessageComposer.ReportHelpMenu();
+
 
             var skillResponse = new SkillResponse
             {
@@ -231,12 +362,142 @@ namespace DeadLineOfWakeUpSkill_CSharp
             {
                 OutputSpeech = new PlainTextOutputSpeech
                 {
-                    Text = speechText
+                    Text = MessageComposer.ReportAskAnythingElse()
                 }
             };
             skillResponse.Response.Card = new SimpleCard
             {
-                Title = "Hello World",
+                Title = skillName,
+                Content = speechText
+            };
+
+            return skillResponse;
+        }
+
+
+        /// <summary>
+        /// 組み込みインテント用
+        /// </summary>
+        /// <param name="skillRequest"></param>
+        /// <returns></returns>
+        private SkillResponse HelpAboutReportRemainTimeIntent(SkillRequest skillRequest)
+        {
+            var intentRequest = skillRequest.Request as IntentRequest;
+
+
+            var speechText = "";
+
+
+            speechText += MessageComposer.ReportHelpAboutReportRemainTime();
+            speechText += MessageComposer.ReportAskAnythingElse();
+
+            var skillResponse = new SkillResponse
+            {
+                Version = "1.0",
+                Response = new ResponseBody()
+            };
+
+            skillResponse.Response.OutputSpeech = new PlainTextOutputSpeech
+            {
+                Text = speechText
+            };
+            skillResponse.Response.Reprompt = new Reprompt
+            {
+                OutputSpeech = new PlainTextOutputSpeech
+                {
+                    Text = MessageComposer.ReportAskAnythingElse()
+                }
+            };
+            skillResponse.Response.Card = new SimpleCard
+            {
+                Title = skillName,
+                Content = speechText
+            };
+
+            return skillResponse;
+        }
+
+
+        /// <summary>
+        /// 組み込みインテント用
+        /// </summary>
+        /// <param name="skillRequest"></param>
+        /// <returns></returns>
+        private SkillResponse HelpAboutReportSettingIntent(SkillRequest skillRequest)
+        {
+            var intentRequest = skillRequest.Request as IntentRequest;
+
+
+            var speechText = "";
+
+
+            speechText += MessageComposer.ReportHelpAboutReportSetting();
+            speechText += MessageComposer.ReportAskAnythingElse();
+
+            var skillResponse = new SkillResponse
+            {
+                Version = "1.0",
+                Response = new ResponseBody()
+            };
+
+            skillResponse.Response.OutputSpeech = new PlainTextOutputSpeech
+            {
+                Text = speechText
+            };
+            skillResponse.Response.Reprompt = new Reprompt
+            {
+                OutputSpeech = new PlainTextOutputSpeech
+                {
+                    Text = MessageComposer.ReportAskAnythingElse()
+                }
+            };
+            skillResponse.Response.Card = new SimpleCard
+            {
+                Title = skillName,
+                Content = speechText
+            };
+
+            return skillResponse;
+        }
+
+
+        /// <summary>
+        /// 組み込みインテント用
+        /// </summary>
+        /// <param name="skillRequest"></param>
+        /// <returns></returns>
+        private SkillResponse HelpAboutSetTimeIntent(SkillRequest skillRequest)
+        {
+            var intentRequest = skillRequest.Request as IntentRequest;
+
+
+            var speechText = "";
+
+
+            speechText += MessageComposer.ReportHelpAboutSetTime();
+
+            speechText += MessageComposer.ReportAskAnythingElse();
+
+            var skillResponse = new SkillResponse
+            {
+                Version = "1.0",
+                Response = new ResponseBody()
+            };
+
+            skillResponse.Response.OutputSpeech = new PlainTextOutputSpeech
+            {
+                Text = speechText
+            };
+            skillResponse.Response.Reprompt = new Reprompt
+            {
+                OutputSpeech = new PlainTextOutputSpeech
+                {
+                    Text = MessageComposer.ReportAskAnythingElse()
+                }
+            };
+            skillResponse.Response.Card = new SimpleCard
+            {
+                Title = skillName,
                 Content = speechText
             };
 
@@ -253,7 +514,7 @@ namespace DeadLineOfWakeUpSkill_CSharp
         {
             var intentRequest = skillRequest.Request as IntentRequest;
 
-            var speechText = "Goodbye!";
+            var speechText = MessageComposer.ReportGoodby();
 
             var skillResponse = new SkillResponse
             {
@@ -267,7 +528,7 @@ namespace DeadLineOfWakeUpSkill_CSharp
             };
             skillResponse.Response.Card = new SimpleCard
             {
-                Title = "Hello World",
+                Title = cardTitle,
                 Content = speechText
             };
             skillResponse.Response.ShouldEndSession = true;
@@ -302,7 +563,7 @@ namespace DeadLineOfWakeUpSkill_CSharp
         /// <returns></returns>
         private SkillResponse ErrorHandler(SkillRequest skillRequest)
         {
-            var speechText = "Sorry, I can't understand the command. Please say again.";
+            var speechText = "ごめんなさい。よく聞こえませんでした。もう一度言ってください。";
 
             var skillResponse = new SkillResponse
             {
